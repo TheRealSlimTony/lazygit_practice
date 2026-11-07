@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Restaura únicamente este laboratorio; ejecutar con --dry-run para inspeccionar."""
+import argparse
+from pathlib import Path
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parent
+MARKER = 'lazygit-practice-lab-v1'
+SCENARIOS = ('promocion', 'precio-local', 'precio-equipo', 'rebase-base', 'rebase-feature')
+
+def git(*args):
+    return subprocess.check_output(['git', '-C', str(ROOT), *args], text=True).strip()
+
+def run(*args):
+    subprocess.run(['git', '-C', str(ROOT), *args], check=True)
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--dry-run', action='store_true', help='Ver el plan sin cambiar nada')
+    parser.add_argument('--yes', action='store_true', help='Reiniciar sin confirmación interactiva')
+    args = parser.parse_args()
+    if Path(git('rev-parse', '--show-toplevel')).resolve() != ROOT:
+        raise RuntimeError('El script debe estar en la raíz del laboratorio.')
+    if (ROOT / '.lab-id').read_text().strip() != MARKER:
+        raise RuntimeError('Este directorio no es el laboratorio esperado.')
+    if sum(line.startswith('worktree ') for line in git('worktree', 'list', '--porcelain').splitlines()) != 1:
+        raise RuntimeError('Hay varios worktrees. No se hará ningún cambio.')
+    names = ('base', *SCENARIOS)
+    targets = {name: git('rev-parse', '--verify', f'refs/tags/inicio/{name}^{{commit}}') for name in names}
+    if git('show', f"{targets['base']}:.lab-id") != MARKER:
+        raise RuntimeError('La base no contiene el identificador del laboratorio actualizado.')
+    for name, oid in targets.items():
+        if git('show', f'{oid}:.lab-id') != MARKER:
+            raise RuntimeError(f'Punto de inicio inválido: {name}')
+    branches = git('for-each-ref', '--format=%(refname:short)', 'refs/heads').splitlines()
+    tags = git('tag', '--list').splitlines()
+    keep_tags = {f'inicio/{name}' for name in names}
+    print('REINICIO DEL LABORATORIO:', ROOT)
+    print('• Restaurar main y escenario/* desde las seis etiquetas inicio/*.')
+    print('• Descartar ediciones y borrar archivos no versionados e ignorados.')
+    print('• Abortar operaciones pendientes y vaciar todos los stashes.')
+    extra = [b for b in branches if b not in {'main', *(f'escenario/{s}' for s in SCENARIOS)}]
+    print('• Eliminar ramas adicionales:', ', '.join(extra) or '(ninguna)')
+    print('• Eliminar etiquetas adicionales:', ', '.join(t for t in tags if t not in keep_tags) or '(ninguna)')
+    print('• Conservar guía, script y escenarios. No se purgará el reflog.')
+    if args.dry_run:
+        return
+    if not args.yes and input('Para borrar el progreso, escribe RESTART: ').strip() != 'RESTART':
+        print('Cancelado. No se modificó nada.')
+        return
+    # Detectar la operación antes de restablecer el índice y el árbol.
+    def exists(name):
+        return Path(git('rev-parse', '--path-format=absolute', '--git-path', name)).exists()
+    if exists('rebase-merge') or exists('rebase-apply'):
+        run('rebase', '--abort')
+    elif exists('MERGE_HEAD'):
+        run('merge', '--abort')
+    elif exists('CHERRY_PICK_HEAD'):
+        run('cherry-pick', '--abort')
+    elif exists('REVERT_HEAD'):
+        run('revert', '--abort')
+    elif exists('sequencer'):
+        raise RuntimeError('Hay una secuencia pendiente sin identificar. Termínala o abórtala primero.')
+    run('reset', '--hard', targets['base'])
+    run('checkout', '-B', 'main', targets['base'])
+    for branch in branches:
+        if branch != 'main':
+            run('branch', '-D', branch)
+    for name in SCENARIOS:
+        run('branch', f'escenario/{name}', targets[name])
+    for tag in tags:
+        if tag not in keep_tags:
+            run('tag', '-d', tag)
+    run('stash', 'clear')
+    run('clean', '-fdx')
+    print('\nListo: main limpia y escenarios restaurados. Ejecuta lazygit y comienza el ejercicio 1.')
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (subprocess.CalledProcessError, OSError, RuntimeError, EOFError) as error:
+        print(f'No se pudo completar el reinicio: {error}', file=sys.stderr)
+        sys.exit(1)
